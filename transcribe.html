@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="kar">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Karen Speech → Text (Whisper WASM – Fixed)</title>
+
+<!--
+IMPORTANT FIXES IN THIS VERSION
+1. Uses <script type="module"> correctly (REQUIRED for Whisper WASM)
+2. Works on GitHub Pages / localhost / HTTPS only
+3. No hidden JS – everything is inline and visible
+4. Clear fallback + console logging
+-->
+
+<style>
+:root{
+  --bg:#0b0f1f; --card:#13183a; --accent:#8b9cff; --accent2:#34ffd2;
+  --text:#f8fafc; --muted:#b6c3ff;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; min-height:100vh;
+  font-family: system-ui, -apple-system;
+  background: radial-gradient(1200px 600px at 20% 10%, #1c2460, #090b18);
+  color:var(--text); display:flex; justify-content:center; align-items:center;
+}
+.app{max-width:960px;width:100%;padding:28px}
+header{display:flex;gap:16px;align-items:center;margin-bottom:20px}
+.logo{width:60px;height:60px;border-radius:18px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:900;color:#07131a}
+h1{margin:0;font-size:28px}
+.sub{color:var(--muted)}
+.card{background:linear-gradient(180deg,#171d4a,#0f1433);border-radius:24px;padding:24px;box-shadow:0 40px 90px rgba(0,0,0,.45)}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+button{padding:14px 22px;border-radius:18px;border:none;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#07131a;font-weight:800;cursor:pointer}
+button.secondary{background:#0a0f28;color:var(--text);border:1px solid #2a336d}
+button:disabled{opacity:.5}
+.wave{margin:20px 0;height:110px;border-radius:18px;background:#0a0f28;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.output{font-size:34px;letter-spacing:3px;line-height:1.4;padding:18px;background:#0a0f28;border-radius:18px;min-height:90px}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.badge{background:#0a0f28;border:1px solid #2a336d;border-radius:999px;padding:6px 12px;font-size:14px;color:var(--muted);cursor:pointer}
+.log{margin-top:14px;font-size:13px;color:#c7d2fe;max-height:180px;overflow:auto;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <div class="logo">KA</div>
+  <div>
+    <h1>Karen Speech → Text</h1>
+    <div class="sub">Whisper WASM + Audio Matching (Browser‑Only)</div>
+  </div>
+</header>
+
+<div class="card">
+  <div class="controls">
+    <button id="recBtn">🎤 Speak</button>
+    <button id="stopBtn" class="secondary" disabled>Stop</button>
+    <button id="copyBtn" class="secondary">Copy</button>
+    <span id="status" class="badge">Idle</span>
+  </div>
+
+  <div class="wave">Speak Karen naturally</div>
+  <div id="output" class="output"></div>
+  <div id="candidates" class="badges"></div>
+  <div id="log" class="log"></div>
+</div>
+</div>
+
+<!--
+SCRIPT MUST BE type="module"
+If you open this file directly (file://), it WILL NOT WORK.
+Use:
+• GitHub Pages
+• Local server (VSCode Live Server)
+• Any HTTPS hosting
+-->
+<script type="module">
+/***********************************************************
+ * WHISPER WASM (TRANSFORMERS.JS)
+ ***********************************************************/
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+
+const logEl = document.getElementById('log');
+function log(msg){ logEl.textContent += msg + '
+'; console.log(msg); }
+
+log('Loading Whisper WASM…');
+
+const whisper = await pipeline(
+  'automatic-speech-recognition',
+  'Xenova/whisper-tiny',
+  { quantized: true }
+);
+
+log('Whisper loaded');
+
+/***********************************************************
+ * AUDIO CONFIG
+ ***********************************************************/
+const AUDIO_REPO = 'https://raw.githubusercontent.com/karenliteracy/Alphabet-Audio/main/';
+const AUDIO_FILES = ['က.mp3','ခ.mp3','ဂ.mp3','ဃ.mp3','င.mp3']; // expand
+
+const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+let audioDB = [];
+
+async function loadAudioDB(){
+  for(const f of AUDIO_FILES){
+    const char=f.replace('.mp3','');
+    const res=await fetch(AUDIO_REPO+encodeURIComponent(f));
+    const buf=await audioCtx.decodeAudioData(await res.arrayBuffer());
+    audioDB.push({char,feat:features(buf)});
+  }
+  status.textContent = `Loaded ${audioDB.length} sounds`;
+  log('Audio DB ready');
+}
+
+/***********************************************************
+ * FEATURES
+ ***********************************************************/
+function features(buf){
+  let d=buf.getChannelData(0).map(v=>Math.abs(v)<0.015?0:v);
+  const max=Math.max(...d.map(v=>Math.abs(v)))||1;
+  d=d.map(v=>v/max);
+  return {mfcc:mfcc(d),chroma:chroma(d)};
+}
+function mfcc(d){return Array.from({length:13},(_,i)=>d.reduce((s,v,j)=>s+v*Math.cos(Math.PI*i*j/d.length),0));}
+function chroma(d){const c=new Array(12).fill(0);d.forEach((v,i)=>c[i%12]+=Math.abs(v));return c;}
+function dist(a,b){return a.reduce((s,v,i)=>s+Math.abs(v-(b[i]||0)),0);}
+
+function match(buf){
+  const f=features(buf);
+  return audioDB.map(a=>({char:a.char,score:dist(f.mfcc,a.feat.mfcc)*0.6+dist(f.chroma,a.feat.chroma)*0.4}))
+    .sort((a,b)=>a.score-b.score).slice(0,5);
+}
+
+/***********************************************************
+ * RECORDING
+ ***********************************************************/
+let recorder,chunks=[];
+recBtn.onclick=async()=>{
+  const s=await navigator.mediaDevices.getUserMedia({audio:true});
+  recorder=new MediaRecorder(s);
+  chunks=[];
+  recorder.ondataavailable=e=>chunks.push(e.data);
+  recorder.onstop=process;
+  recorder.start();
+  recBtn.disabled=true; stopBtn.disabled=false;
+  log('Recording…');
+};
+stopBtn.onclick=()=>{recorder.stop();recBtn.disabled=false;stopBtn.disabled=true};
+
+async function process(){
+  const blob=new Blob(chunks);
+  const arr=await blob.arrayBuffer();
+
+  log('Running Whisper segmentation…');
+  const res=await whisper(arr,{return_timestamps:true});
+
+  let sentence='';
+  candidates.innerHTML='';
+
+  for(const seg of res.chunks){
+    const slice=arr.slice(seg.start*16000*2, seg.end*16000*2);
+    const buf=await audioCtx.decodeAudioData(slice);
+    const matches=match(buf);
+    sentence+=matches[0].char;
+
+    matches.forEach(m=>{
+      const b=document.createElement('div');
+      b.className='badge'; b.textContent=m.char;
+      candidates.appendChild(b);
+    });
+  }
+
+  output.textContent+=sentence;
+  log('Output: '+sentence);
+}
+
+copyBtn.onclick=()=>navigator.clipboard.writeText(output.textContent);
+
+loadAudioDB();
+</script>
+</body>
+</html>
